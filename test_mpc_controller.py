@@ -1,10 +1,8 @@
 """
-MPC专家控制器测试程序 (V2 - 改进版)
-
 该程序用于在特定初始条件下测试MPC控制器的性能，并生成
 可视化图表和动画，以便于分析和调试算法。
 
-V2版核心改进：
+核心改进：
 - **引入平台轨迹预测**：不再使用平台当前位置作为静态目标，而是利用平台的动力学模型
   和已知控制输入，预测出未来N步的运动轨迹。
 - **动态参考轨迹**：将预测出的平台轨迹作为MPC的动态参考目标，使无人机能够“预见”
@@ -20,7 +18,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
-from scipy.linalg import block_diag # 【新】导入用于构建块对角矩阵的工具
+from scipy.linalg import block_diag
 
 # 从项目中导入必要的模块
 from envs import QuadrotorLandingEnv, MovingPlatformDynamics, PlatformState
@@ -117,7 +115,7 @@ def generate_mpc_reference_trajectory(quad_world_state, plat_traj_pred, N):
 
     # 计算初始的位置和速度误差
     initial_pos_error = current_quad_pos - current_platform_pos
-    
+
     # 遍历预测时域，为每一步生成参考状态
     for k in range(N):
         # 1. 参考位置 (p_ref):
@@ -143,7 +141,7 @@ def generate_mpc_reference_trajectory(quad_world_state, plat_traj_pred, N):
 
         # 组合成完整的参考状态向量
         x_ref[:, k] = np.concatenate([p_ref_k, v_ref_k, q_ref_k])
-    
+
     return x_ref
 
 # ==============================================================
@@ -152,7 +150,7 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
     """
     运行单次MPC仿真并返回历史记录。
     """
-    print("--- 开始运行仿真 (使用V2预测模型) ---")
+    print("--- 开始运行仿真 ---")
     reset_params = {
         'quad_init_position': simulation_params['quad_init_position'],
         'quad_init_velocity': simulation_params['quad_init_velocity'],
@@ -171,25 +169,10 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         'rel_pos': []
     }
 
-    # ================== FIX: 初始化MPC的初始猜测 ==================
+    # 【新】从Config加载基础权重矩阵Q和R，这些将在循环中用于计算Q_nlp和p_nlp
     nx, nu, N = mpc_solver.nx, mpc_solver.nu, mpc_solver.N
-    # 状态的初始猜测：在整个时域内保持当前状态
-    x_guess = np.tile(
-        np.concatenate([info['quadrotor']['position'], info['quadrotor']['velocity'], info['quadrotor']['quaternions']]),
-        (N + 1, 1)
-    ).flatten()
-    # 控制的初始猜测：在整个时域内保持悬停（推力大致抵消重力，其他为0）
-    hover_thrust = (Config.Quadrotor.MASS * Config.GRAVITY) / mpc_solver.model.k_thrust
-    u_guess = np.tile(np.array([hover_thrust, 0, 0, 0]), (N, 1)).flatten()
-    # 组合成完整的决策变量初始猜测
-    mpc_init_guess = np.concatenate([x_guess, u_guess])
-
-    # 【新】从Config加载基础权重矩阵Q和R
-    Q_diag = np.array(Config.MPC.STATE_WEIGHTS)
-    R_diag = np.array(Config.MPC.CONTROL_WEIGHTS)
-    Q = np.diag(Q_diag)
-    R = np.diag(R_diag)
-    # ==============================================================
+    Q = np.diag(Config.MPC.STATE_WEIGHTS)
+    R = np.diag(Config.MPC.CONTROL_WEIGHTS)
 
     # 仿真循环
     max_steps = int(Config.MAX_EPISODE_TIME / Config.DELTA_T)
@@ -204,16 +187,14 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
 
         # 2. 预测平台未来轨迹，并生成MPC参考轨迹
         platform_trajectory_prediction = predict_platform_trajectory(
-            current_platform_state, platform_control, mpc_solver.N, env.dt
+            current_platform_state, platform_control, N, env.dt
         )
         x_ref_val = generate_mpc_reference_trajectory(
-            quad_world_state, platform_trajectory_prediction, mpc_solver.N
+            quad_world_state, platform_trajectory_prediction, N
         )
 
-        # 3. 【新】构建代价函数的 Q_nlp 和 p_nlp 参数
-        #    在实际应用中，这一步将被替换为神经网络的输出来实现自适应控制。
+        # 3. 构建代价函数的 Q_nlp 和 p_nlp 参数
         # 3.1 构建 Q_nlp_val 矩阵
-        #     这里我们使用固定的Q和R，但在未来可以由神经网络动态调整Q和R的值
         q_nlp_blocks = [np.zeros((nx, nx))] + [2 * Q] * N + [2 * R] * N
         Q_nlp_val = block_diag(*q_nlp_blocks)
 
@@ -225,12 +206,10 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         p_nlp_val = np.concatenate(p_nlp_list)
 
         # 4. 【新】调用更新后的MPC求解器
-        #    传入初始状态、计算好的Q_nlp和p_nlp，以及用于热启动的初始猜测
-        u_opt_quad, mpc_init_guess = mpc_solver.solve(
-            quad_world_state, Q_nlp_val, p_nlp_val, mpc_init_guess
+        #    求解器现在内部管理热启动，我们只需传入当前状态和代价函数参数。
+        u_opt_quad = mpc_solver.solve(
+            quad_world_state, Q_nlp_val, p_nlp_val
         )
-        # 使用上一步的解作为下一步的初始猜测（热启动），可以提高稳定性和速度
-        # ======================================================================
 
         # 5. 在仿真环境中执行动作
         action = {'quadrotor': u_opt_quad, 'platform': platform_control}
@@ -361,22 +340,20 @@ def create_animation(history, output_dir, filename="mpc_landing_animation.gif"):
 # =============== 主程序入口 ===============
 if __name__ == "__main__":
     # --- 1. 定义测试场景 ---
-    # 这个场景中，平台不仅有初速度，还有加速度和转向输入，是一个典型的动态跟踪任务。
     simulation_params = {
         'quad_init_position': np.array([2.0, -1.5, 5.0]),
         'quad_init_velocity': np.array([0.0, 0.0, 0.0]),
         'quad_init_quaternions': euler_to_quaternion(0, 0, np.deg2rad(0)),
         
         'platform_init_state': np.array([0.0, 0.0, 0.8, np.deg2rad(30)]), # x, y, v, psi
-        'platform_u1': 0.2,  # 平台有轻微的纵向加速度
-        'platform_u2': np.deg2rad(-30.0) # 平台正在向右转弯 (负号表示顺时针)
+        'platform_u1': 0.2,
+        'platform_u2': np.deg2rad(-30.0)
     }
 
-    print("MPC控制器测试程序 (V2: 带预测模型)")
+    print("MPC控制器测试程序 (V4: 内部热启动)")
     print("=" * 50)
     print("当前测试场景参数:")
     for k, v in simulation_params.items():
-        # 将numpy数组格式化输出以便阅读
         if isinstance(v, np.ndarray):
             print(f"  - {k:<25}: {np.round(v, 3)}")
         else:
