@@ -5,7 +5,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import config.config as Config
-from .dynamics import QuadrotorDynamics, MovingPlatformDynamics, quaternion_multiply
+from .dynamics import QuadrotorDynamics, MovingPlatformDynamics, quaternion_multiply, PlatformState
 
 
 class QuadrotorLandingEnv(gym.Env):
@@ -39,11 +39,14 @@ class QuadrotorLandingEnv(gym.Env):
         })
 
         # 定义观测空间（同样为保持接口完整性）
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32)
         self.steps_count = 0
 
         # 从配置中加载终止条件参数
         self._load_termination_params()
+
+        # 增加一个变量来存储上一时刻的平台状态，用于计算时序特征
+        self.prev_platform_state: PlatformState = None
 
     def _load_termination_params(self):
         """从配置文件加载终止条件参数"""
@@ -67,6 +70,8 @@ class QuadrotorLandingEnv(gym.Env):
         # 重置动力学模型
         self.quadrotor.reset(quad_init_position, quad_init_velocity, quad_init_quaternions)
         self.platform.reset(platform_init_state)
+
+        self.prev_platform_state = self.platform.state.copy()
 
         # 重置计数器
         self.steps_count = 0
@@ -105,32 +110,51 @@ class QuadrotorLandingEnv(gym.Env):
     def _get_obs(self):
         """
         计算相对观测值（仅用于终止判断和调试）。
-        MPC控制器将直接使用世界坐标系下的绝对状态。
+        观测 = [10维相对状态] + [3维平台时序特征]
         """
-        p_state = self.platform.state
+        current_p_state = self.platform.state
         q_state = self.quadrotor.state
-
-        # 平台在世界坐标系下的速度
-        plat_vel_world = np.array([p_state.v * np.cos(p_state.psi), p_state.v * np.sin(p_state.psi), 0.0])
-        # 平台着陆面在世界坐标系下的位置
-        plat_pos_world = np.array([p_state.x, p_state.y, Config.MovingPlatform.HEIGHT])
-
-        # 计算相对位置和速度（世界坐标系下）
+        # --- Part 1: 计算10维相对状态 (逻辑不变) ---
+        plat_vel_world = np.array([current_p_state.v * np.cos(current_p_state.psi), current_p_state.v * np.sin(current_p_state.psi), 0.0])
+        plat_pos_world = np.array([current_p_state.x, current_p_state.y, Config.MovingPlatform.HEIGHT])
+        
         rel_pos_world = q_state.position - plat_pos_world
         rel_vel_world = q_state.velocity - plat_vel_world
-
-        # 将相对向量旋转到平台坐标系
-        cos_psi, sin_psi = np.cos(-p_state.psi), np.sin(-p_state.psi)
-        R_platform_to_world = np.array([[cos_psi, -sin_psi, 0], [sin_psi, cos_psi, 0], [0, 0, 1]])
-        rel_pos_platform = R_platform_to_world @ rel_pos_world
-        rel_vel_platform = R_platform_to_world @ rel_vel_world
-
-        # 计算相对姿态
-        plat_quat_world = np.array([np.cos(p_state.psi / 2), 0, 0, np.sin(p_state.psi / 2)])
+        # 将相对向量旋转到平台坐标系，注意这里用的是负psi来获得世界到平台的旋转
+        cos_psi, sin_psi = np.cos(-current_p_state.psi), np.sin(-current_p_state.psi)
+        R_world_to_platform_3d = np.array([[cos_psi, -sin_psi, 0], [sin_psi, cos_psi, 0], [0, 0, 1]])
+        
+        rel_pos_platform = R_world_to_platform_3d @ rel_pos_world
+        rel_vel_platform = R_world_to_platform_3d @ rel_vel_world
+        
+        plat_quat_world = np.array([np.cos(current_p_state.psi / 2), 0, 0, np.sin(current_p_state.psi / 2)])
         plat_quat_conj = np.array([plat_quat_world[0], -plat_quat_world[1], -plat_quat_world[2], -plat_quat_world[3]])
         rel_quat = quaternion_multiply(plat_quat_conj, q_state.quaternions)
-
-        return np.concatenate([rel_pos_platform, rel_vel_platform, rel_quat]).astype(np.float32)
+        
+        relative_state = np.concatenate([rel_pos_platform, rel_vel_platform, rel_quat])
+        # --- Part 2: 【新】计算3维平台时序特征 ---
+        # 1. 计算世界坐标系下的位移和朝向变化
+        dx_world = current_p_state.x - self.prev_platform_state.x
+        dy_world = current_p_state.y - self.prev_platform_state.y
+        d_psi = current_p_state.psi - self.prev_platform_state.psi
+        # 角度环绕处理，确保d_psi在[-pi, pi]之间
+        d_psi = (d_psi + np.pi) % (2 * np.pi) - np.pi
+        # 2. 将世界坐标系下的位移 (dx, dy) 旋转到当前平台的坐标系下
+        # 旋转矩阵 (2D): [[cos(psi), sin(psi)], [-sin(psi), cos(psi)]]
+        c_psi, s_psi = np.cos(current_p_state.psi), np.sin(current_p_state.psi)
+        dx_platform = dx_world * c_psi + dy_world * s_psi
+        dy_platform = -dx_world * s_psi + dy_world * c_psi
+        
+        temporal_features = np.array([dx_platform, dy_platform, d_psi])
+        
+        # --- Part 3: 更新状态并组合观测 ---
+        # 更新上一时刻状态，为下次计算做准备
+        self.prev_platform_state = current_p_state.copy()
+        
+        # 组合成最终的观测向量
+        final_obs = np.concatenate([relative_state, temporal_features]).astype(np.float32)
+        
+        return final_obs
 
     def check_done(self, rel_obs: np.ndarray):
         """

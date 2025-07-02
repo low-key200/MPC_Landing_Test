@@ -192,7 +192,7 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         mpc_input_state = np.concatenate([
             current_relative_obs[:3],                  # 相对位置 p_rel (正确)
             quad_inertial_vel_in_platform_frame,       # 修正后的惯性速度 v_inertial
-            current_relative_obs[6:]                   # 相对姿态 q_rel (正确)
+            current_relative_obs[6:10]                   # 相对姿态 q_rel (正确)
         ])
         # ==========================================================
 

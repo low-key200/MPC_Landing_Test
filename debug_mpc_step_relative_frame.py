@@ -218,7 +218,7 @@ if __name__ == "__main__":
     platform_control = np.array([simulation_params['platform_u1'], simulation_params['platform_u2']])
     
     # --- 3. 获取无人机相对状态和平台信息 ---
-    quad_relative_state = obs
+    quad_relative_state = obs[:10]
     print("\n[2] 从环境中获取的无人机初始相对状态 (obs):")
     print(f"  - 相对位置: {np.round(quad_relative_state[:3], 4)}")
     print(f"  - 相对速度: {np.round(quad_relative_state[3:6], 4)}")
