@@ -126,7 +126,7 @@ class QuadMPC:
 
         # --- 参数 (Parameters) ---
         X_init = MX.sym('X_init', self.nx)
-        Q_nlp_sym = MX.sym('Q_nlp_vec', self.z_dim, 1)
+        Q_nlp_sym = MX.sym('Q_nlp', self.z_dim, 1)
         p_nlp_sym = MX.sym('p_nlp', self.z_dim, 1)
 
         # --- 构建NLP形式的目标函数 J = 0.5*z^T*Q*z + p^T*z ---
@@ -169,7 +169,7 @@ class QuadMPC:
         """
         Args:
             x_init_val: 无人机当前状态 [nx, 1]。
-            Q_nlp_vec_val: 代价函数二次项的权重【向量】[z_dim, 1]。
+            Q_nlp_val: 代价函数二次项的权重【向量】[z_dim, 1]。
             p_nlp_val: 代价函数线性项的权重向量 [z_dim, 1]。
         Returns:
             u_opt: 最优控制序列中的第一个控制输入 [nu, 1]。
