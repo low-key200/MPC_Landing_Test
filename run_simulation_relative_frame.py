@@ -27,7 +27,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
-from scipy.linalg import block_diag
 
 # 从项目中导入必要的模块
 from envs import QuadrotorLandingEnv, MovingPlatformDynamics, PlatformState
@@ -157,8 +156,9 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
 
     # 2. 预加载MPC代价函数矩阵
     nx, nu, N = mpc_solver.nx, mpc_solver.nu, mpc_solver.N
-    Q = np.diag(Config.MPC.STATE_WEIGHTS)
-    R = np.diag(Config.MPC.CONTROL_WEIGHTS)
+    q_weights = np.array(Config.MPC.STATE_WEIGHTS)
+    r_weights = np.array(Config.MPC.CONTROL_WEIGHTS)
+
 
     # 3. 运行仿真主循环
     max_steps = int(Config.MAX_EPISODE_TIME / Config.DELTA_T)
@@ -207,12 +207,16 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         )
 
         # 步骤 3.3: 构建代价函数
-        q_nlp_blocks = [np.zeros((nx, nx))] + [2 * Q] * N + [2 * R] * N
-        Q_nlp_val = block_diag(*q_nlp_blocks)
+        Q_nlp_val = np.concatenate([
+            np.zeros(nx),
+            np.tile(2 * q_weights, N),
+            np.tile(2 * r_weights, N)
+        ])
 
         p_nlp_list = [np.zeros(nx)]
         for k in range(N):
-            p_nlp_list.append(-2 * Q @ x_ref_val[:, k])
+            # 使用向量元素乘法代替矩阵乘法
+            p_nlp_list.append(-2 * q_weights * x_ref_val[:, k])
         p_nlp_list.append(np.zeros(nu * N))
         p_nlp_val = np.concatenate(p_nlp_list)
 

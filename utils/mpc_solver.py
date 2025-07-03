@@ -110,7 +110,6 @@ class QuadMPC:
         self.nx = self.model.n_state
         self.nu = self.model.n_ctrl
         self.F = self.model.integrator(dt)  # 获取离散时间动力学模型
-        # 【新】增加成员变量，用于存储上一步的完整解，作为下一次求解的初始猜测（热启动）
         self.z_guess = None
         self._create_solver()
 
@@ -127,11 +126,12 @@ class QuadMPC:
 
         # --- 参数 (Parameters) ---
         X_init = MX.sym('X_init', self.nx)
-        Q_nlp_sym = MX.sym('Q_nlp', self.z_dim, self.z_dim)
+        Q_nlp_sym = MX.sym('Q_nlp_vec', self.z_dim, 1)
         p_nlp_sym = MX.sym('p_nlp', self.z_dim, 1)
 
         # --- 构建NLP形式的目标函数 J = 0.5*z^T*Q*z + p^T*z ---
-        obj = 0.5 * mtimes([z.T, Q_nlp_sym, z]) + mtimes(p_nlp_sym.T, z)
+        # z*z 是逐元素平方，dot是点积。这等价于 Sum(0.5 * Q_i * z_i^2)。
+        obj = 0.5 * dot(z * z, Q_nlp_sym) + dot(p_nlp_sym, z)
 
         # --- 构建约束 (Constraints) ---
         g = []
@@ -142,7 +142,7 @@ class QuadMPC:
         g_vec = vertcat(*g)
 
         # --- 创建NLP求解器 ---
-        nlp_params = vertcat(X_init, reshape(Q_nlp_sym, -1, 1), p_nlp_sym)
+        nlp_params = vertcat(X_init, Q_nlp_sym, p_nlp_sym)
         nlp_prob = {
             'f': obj,
             'x': z,
@@ -167,17 +167,14 @@ class QuadMPC:
 
     def solve(self, x_init_val: np.ndarray, Q_nlp_val: np.ndarray, p_nlp_val: np.ndarray):
         """
-        求解一步MPC问题。
-        【V4修改】此方法现在内部管理初始解，无需外部传入。
-
         Args:
             x_init_val: 无人机当前状态 [nx, 1]。
-            Q_nlp_val: 代价函数二次项的权重矩阵 [z_dim, z_dim]。
+            Q_nlp_vec_val: 代价函数二次项的权重【向量】[z_dim, 1]。
             p_nlp_val: 代价函数线性项的权重向量 [z_dim, 1]。
         Returns:
             u_opt: 最优控制序列中的第一个控制输入 [nu, 1]。
         """
-        # 【新】检查是否存在可用的初始解（热启动），如果不存在（第一次运行），则创建默认初始解（冷启动）
+        # 检查是否存在可用的初始解（热启动），如果不存在（第一次运行），则创建默认初始解（冷启动）
         if self.z_guess is None:
             # 创建一个合理的冷启动初始解
             x_guess = np.tile(x_init_val, (self.N + 1, 1)).flatten()
@@ -186,8 +183,7 @@ class QuadMPC:
             self.z_guess = np.concatenate([x_guess, u_guess])
 
         # --- 将所有参数的数值打包 ---
-        q_nlp_flat = Q_nlp_val.reshape(-1, 1, order='F')
-        p_val = vertcat(x_init_val, q_nlp_flat, p_nlp_val)
+        p_val = vertcat(x_init_val, Q_nlp_val, p_nlp_val)
 
         # 求解NLP
         res = self.solver(
@@ -199,7 +195,7 @@ class QuadMPC:
             ubg=self.ubg
         )
 
-        # 【新】用当前计算出的最优解更新内部存储的初始解，为下一次热启动做准备
+        # 用当前计算出的最优解更新内部存储的初始解，为下一次热启动做准备
         self.z_guess = res['x'].full().flatten()
 
         # 从解中提取最优控制序列

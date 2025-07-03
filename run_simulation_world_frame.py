@@ -28,7 +28,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
-from scipy.linalg import block_diag
 
 # 从项目中导入必要的模块
 from envs import QuadrotorLandingEnv, MovingPlatformDynamics, PlatformState
@@ -160,8 +159,8 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
 
     # 2. 预加载MPC代价函数矩阵
     nx, nu, N = mpc_solver.nx, mpc_solver.nu, mpc_solver.N
-    Q = np.diag(Config.MPC.STATE_WEIGHTS)
-    R = np.diag(Config.MPC.CONTROL_WEIGHTS)
+    q_weights = np.array(Config.MPC.STATE_WEIGHTS)   # 状态权重向量
+    r_weights = np.array(Config.MPC.CONTROL_WEIGHTS) # 控制权重向量
 
     # 3. 运行仿真主循环
     max_steps = int(Config.MAX_EPISODE_TIME / Config.DELTA_T)
@@ -183,13 +182,17 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         )
 
         # 步骤 3.3: 构建当前步的代价函数参数
-        q_nlp_blocks = [np.zeros((nx, nx))] + [2 * Q] * N + [2 * R] * N
-        Q_nlp_val = block_diag(*q_nlp_blocks)
+        Q_nlp_val = np.concatenate([
+            np.zeros(nx),                  # X_0 (初始状态) 的代价为0
+            np.tile(2 * q_weights, N),     # X_1 到 X_N 的状态代价
+            np.tile(2 * r_weights, N)      # U_0 到 U_{N-1} 的控制代价
+        ])
 
-        p_nlp_list = [np.zeros(nx)]
+        p_nlp_list = [np.zeros(nx)] # 初始状态x0无线性代价
         for k in range(N):
-            p_nlp_list.append(-2 * Q @ x_ref_val[:, k])
-        p_nlp_list.append(np.zeros(nu * N))
+            # 使用向量进行元素级乘法，等效于 Q @ x_ref，但效率更高
+            p_nlp_list.append(-2 * q_weights * x_ref_val[:, k])
+        p_nlp_list.append(np.zeros(nu * N)) # 控制量 u 无线性代价
         p_nlp_val = np.concatenate(p_nlp_list)
 
         # 步骤 3.4: 调用MPC求解器获取最优控制输入

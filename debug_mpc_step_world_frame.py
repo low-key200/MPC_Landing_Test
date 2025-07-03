@@ -24,7 +24,6 @@
 """
 import numpy as np
 from math import cos, sin
-from scipy.linalg import block_diag
 
 # 从项目中导入必要的模块
 from envs import QuadrotorLandingEnv, MovingPlatformDynamics, PlatformState
@@ -239,27 +238,35 @@ if __name__ == "__main__":
         quad_world_state, platform_traj_pred, N
     )
 
-    # 3.4 构建MPC代价函数 (min 1/2 * z' * H * z + g' * z)
+    # --- 3.4 构建MPC代价函数 (min 0.5 * z' * diag(Q_vec) * z + p' * z) ---
     nx, nu = mpc_solver.nx, mpc_solver.nu
-    Q = np.diag(Config.MPC.STATE_WEIGHTS) # 状态权重矩阵
-    R = np.diag(Config.MPC.CONTROL_WEIGHTS) # 控制权重矩阵
+    q_weights = np.array(Config.MPC.STATE_WEIGHTS)   # 状态权重向量
+    r_weights = np.array(Config.MPC.CONTROL_WEIGHTS) # 控制权重向量
     
-    # 构建二次项矩阵 H (在ACADOS中为Q_nlp)
+    # 构建二次项矩阵 Q_nlp
     # 初始状态x0是固定的，不应被惩罚，因此其对应的代价矩阵块为零。
-    q_nlp_blocks = [np.zeros((nx, nx))] + [2 * Q] * N + [2 * R] * N
-    Q_nlp_val = block_diag(*q_nlp_blocks)
+    # 因子 2 来自于 (z-z_ref)'*Q*(z-z_ref) 的展开: z'Qz - 2z_ref'Qz + const
+    # 对应到NLP形式 0.5*z'*H*z + g'*z，H的对角线即为2*Q
+    Q_nlp_val = np.concatenate([
+        np.zeros(nx),                  # X_0 (初始状态) 的代价为0
+        np.tile(2 * q_weights, N),     # X_1 到 X_N 的状态代价
+        np.tile(2 * r_weights, N)      # U_0 到 U_{N-1} 的控制代价
+    ])
     
-    # 构建线性项向量 g (在ACADOS中为p_nlp)
-    # 线性项来自代价 (x-x_ref)'Q(x-x_ref) 展开后的 -2*x_ref'*Q*x
+    # 构建线性项代价函数的权重向量 p_nlp
+    # 线性项 g'z 来自于 -2*z_ref'*Q*z
     p_nlp_list = [np.zeros(nx)] # 初始状态x0无线性代价
     for k in range(N):
-        p_nlp_list.append(-2 * Q @ x_ref_val[:, k])
-    p_nlp_list.append(np.zeros(nu * N)) # 控制量u无线性代价
+        # 使用向量进行元素级乘法，等效于 Q @ x_ref，但效率更高
+        p_nlp_list.append(-2 * q_weights * x_ref_val[:, k])
+    p_nlp_list.append(np.zeros(nu * N)) # 控制量 u 无线性代价
     p_nlp_val = np.concatenate(p_nlp_list)
     
     # 3.5 调用MPC求解器，获取最优控制输入序列
     # 我们只关心序列中的第一个控制指令，它将在当前时间步被执行。
-    u_opt_quad = mpc_solver.solve(quad_world_state, Q_nlp_val, p_nlp_val)
+    u_opt_quad = mpc_solver.solve(
+        quad_world_state, Q_nlp_val, p_nlp_val
+        )
 
     # --- 4. 打印计算结果 ---
     print("-" * 60)
