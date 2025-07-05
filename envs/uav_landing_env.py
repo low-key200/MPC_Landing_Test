@@ -114,45 +114,54 @@ class QuadrotorLandingEnv(gym.Env):
         """
         current_p_state = self.platform.state
         q_state = self.quadrotor.state
-        # --- Part 1: 计算10维相对状态 (逻辑不变) ---
-        plat_vel_world = np.array([current_p_state.v * np.cos(current_p_state.psi), current_p_state.v * np.sin(current_p_state.psi), 0.0])
+
+        # --- Part 1: 计算10维相对状态 ---
+
+        # 1.1 计算旋转矩阵 (从世界坐标系到平台坐标系)
+        # 旋转角度为 -psi，因此 cos(-psi)=cos(psi), sin(-psi)=-sin(psi)
+        cos_psi = np.cos(current_p_state.psi)
+        sin_psi = np.sin(current_p_state.psi)
+        R_world_to_platform_3d = np.array([
+            [ cos_psi,  sin_psi, 0],
+            [-sin_psi,  cos_psi, 0],
+            [   0,        0,     1]
+        ])
+
+        # 1.2 计算相对位置 (在平台坐标系下)
         plat_pos_world = np.array([current_p_state.x, current_p_state.y, Config.MovingPlatform.HEIGHT])
-        
         rel_pos_world = q_state.position - plat_pos_world
-        rel_vel_world = q_state.velocity - plat_vel_world
-        # 将相对向量旋转到平台坐标系，注意这里用的是负psi来获得世界到平台的旋转
-        cos_psi, sin_psi = np.cos(-current_p_state.psi), np.sin(-current_p_state.psi)
-        R_world_to_platform_3d = np.array([[cos_psi, -sin_psi, 0], [sin_psi, cos_psi, 0], [0, 0, 1]])
-        
         rel_pos_platform = R_world_to_platform_3d @ rel_pos_world
-        rel_vel_platform = R_world_to_platform_3d @ rel_vel_world
-        
+
+        # 1.3 计算无人机惯性速度 (在平台坐标系下)
+        # 直接将无人机的世界惯性速度旋转到平台坐标系
+        quad_inertial_vel_in_platform_frame = R_world_to_platform_3d @ q_state.velocity
+
+        # 1.4 计算相对姿态
         plat_quat_world = np.array([np.cos(current_p_state.psi / 2), 0, 0, np.sin(current_p_state.psi / 2)])
         plat_quat_conj = np.array([plat_quat_world[0], -plat_quat_world[1], -plat_quat_world[2], -plat_quat_world[3]])
         rel_quat = quaternion_multiply(plat_quat_conj, q_state.quaternions)
-        
-        relative_state = np.concatenate([rel_pos_platform, rel_vel_platform, rel_quat])
-        # --- Part 2: 【新】计算3维平台时序特征 ---
-        # 1. 计算世界坐标系下的位移和朝向变化
+
+        # 1.5 组合成10维物理状态
+        mpc_physical_state = np.concatenate([
+            rel_pos_platform, 
+            quad_inertial_vel_in_platform_frame, 
+            rel_quat
+        ])
+
+        # --- Part 2: 计算3维平台时序特征 ---
         dx_world = current_p_state.x - self.prev_platform_state.x
         dy_world = current_p_state.y - self.prev_platform_state.y
         d_psi = current_p_state.psi - self.prev_platform_state.psi
-        # 角度环绕处理，确保d_psi在[-pi, pi]之间
         d_psi = (d_psi + np.pi) % (2 * np.pi) - np.pi
-        # 2. 将世界坐标系下的位移 (dx, dy) 旋转到当前平台的坐标系下
-        # 旋转矩阵 (2D): [[cos(psi), sin(psi)], [-sin(psi), cos(psi)]]
-        c_psi, s_psi = np.cos(current_p_state.psi), np.sin(current_p_state.psi)
-        dx_platform = dx_world * c_psi + dy_world * s_psi
-        dy_platform = -dx_world * s_psi + dy_world * c_psi
+        
+        dx_platform = dx_world * cos_psi + dy_world * sin_psi
+        dy_platform = -dx_world * sin_psi + dy_world * cos_psi
         
         temporal_features = np.array([dx_platform, dy_platform, d_psi])
-        
-        # --- Part 3: 更新状态并组合观测 ---
-        # 更新上一时刻状态，为下次计算做准备
+
+        # --- Part 3: 更新状态并组合最终观测 ---
         self.prev_platform_state = current_p_state.copy()
-        
-        # 组合成最终的观测向量
-        final_obs = np.concatenate([relative_state, temporal_features]).astype(np.float32)
+        final_obs = np.concatenate([mpc_physical_state, temporal_features]).astype(np.float32)
         
         return final_obs
 

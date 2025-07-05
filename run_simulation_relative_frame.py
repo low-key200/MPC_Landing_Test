@@ -163,45 +163,15 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
     # 3. 运行仿真主循环
     max_steps = int(Config.MAX_EPISODE_TIME / Config.DELTA_T)
     for step in tqdm(range(max_steps), desc="MPC仿真进度 (相对)"):
-        # 步骤 3.1: 获取当前观测(相对状态)和信息(绝对状态)
-        current_relative_obs = obs 
-        
-        # ==================== 新增的速度修正部分 ====================
-        # 步骤 3.1.1: 为MPC准备正确的初始状态
-        # MPC的动力学模型假设其输入速度是【惯性速度】。
-        # 而环境提供的 `obs` 中的速度是【相对速度】。
-        # 因此，我们必须将无人机的世界惯性速度，通过坐标旋转，
-        # 转换到当前的平台坐标系下，作为MPC的输入。
-        # 从info字典获取所需的世界坐标系信息
-        quad_world_velocity = info['quadrotor']['velocity']
-        platform_psi = info['platform']['psi']
-
-        # 构建从世界坐标系到平台坐标系的旋转矩阵 (绕Z轴旋转 -psi)
-        cos_psi, sin_psi = np.cos(platform_psi), np.sin(platform_psi)
-        # R_world_to_platform = (R_platform_to_world)^T
-        R_world_to_platform = np.array([
-            [ cos_psi,  sin_psi, 0],
-            [-sin_psi,  cos_psi, 0],
-            [   0,        0,     1]
-        ])
-        
-        # 将无人机的世界惯性速度旋转到平台坐标系下
-        quad_inertial_vel_in_platform_frame = R_world_to_platform @ quad_world_velocity
-        
-        # 组合成MPC真正需要的初始状态向量
-        mpc_input_state = np.concatenate([
-            current_relative_obs[:3],                  # 相对位置 p_rel (正确)
-            quad_inertial_vel_in_platform_frame,       # 修正后的惯性速度 v_inertial
-            current_relative_obs[6:10]                   # 相对姿态 q_rel (正确)
-        ])
-        # ==========================================================
+        # 步骤 3.1: 直接从obs中提取MPC输入状态
+        mpc_input_state = obs[:10]
 
         # 步骤 3.2: 预测平台相对轨迹，并生成相对参考轨迹
         platform_current_v_magnitude = env.platform.state.v
         platform_traj_pred_rel = predict_platform_trajectory_relative(
             platform_current_v_magnitude, platform_control, N, env.dt
         )
-        # 使用修正后的状态来生成参考轨迹
+        # 使用从obs中提取的10维状态来生成参考轨迹
         x_ref_val = generate_mpc_reference_trajectory_relative(
             mpc_input_state, platform_traj_pred_rel, N
         )
@@ -229,7 +199,7 @@ def run_mpc_simulation(env: QuadrotorLandingEnv, mpc_solver: QuadMPC, simulation
         
         # 步骤 3.6: 记录数据 (记录原始的相对位置，以便于观察误差收敛)
         history['time'].append(step * env.dt)
-        history['rel_pos'].append(current_relative_obs[:3]) # 记录修正前的相对位置
+        history['rel_pos'].append(mpc_input_state[:3]) # 记录修正前的相对位置
         history['control_input'].append(u_opt_quad)
         history['quad_pos'].append(info['quadrotor']['position'])
         history['quad_vel'].append(info['quadrotor']['velocity'])

@@ -217,11 +217,11 @@ if __name__ == "__main__":
     platform_control = np.array([simulation_params['platform_u1'], simulation_params['platform_u2']])
     
     # --- 3. 获取无人机相对状态和平台信息 ---
-    quad_relative_state = obs[:10]
+    mpc_input_state = obs[:10]
     print("\n[2] 从环境中获取的无人机初始相对状态 (obs):")
-    print(f"  - 相对位置: {np.round(quad_relative_state[:3], 4)}")
-    print(f"  - 相对速度: {np.round(quad_relative_state[3:6], 4)}")
-    print(f"  - 相对姿态: {np.round(quad_relative_state[6:], 4)}")
+    print(f"  - 相对位置: {np.round(mpc_input_state[:3], 4)}")
+    print(f"  - 惯性速度: {np.round(mpc_input_state[3:6], 4)}")
+    print(f"  - 相对姿态: {np.round(mpc_input_state[6:], 4)}")
     
     print("\n[3] 开始执行单步MPC计算 (在相对坐标系中)...\n")
     
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     
     # --- 5. 生成相对参考轨迹 ---
     x_ref_val = generate_mpc_reference_trajectory_relative(
-        quad_relative_state, platform_traj_pred_relative, N
+        mpc_input_state, platform_traj_pred_relative, N
     )
 
     # --- 6. 构建代价函数并求解 ---
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     
     # 调用求解器。输入是无人机的【相对状态】和为之设计的【相对参考轨迹】。
     u_opt_quad = mpc_solver.solve(
-        quad_relative_state, Q_nlp_val, p_nlp_val
+        mpc_input_state, Q_nlp_val, p_nlp_val
     )
 
     # --- 7. 打印计算结果 ---
